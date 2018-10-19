@@ -1,0 +1,31 @@
+pandas
+jupyter
+pymavlink
+opencv-python
+tensorflow
+tensorflow-gpu
+matplotlib
+imutils
+dlib
+scikit-learn
+scikit-image
+Keras
+mxnet
+Theano
+h5py
+pydot
+
+# rviz
+wstool
+rosdep
+rosinstall
+rosinstall_generator
+rospkg
+catkin-pkg
+sphinx
+wxPython
+
+
+# audio
+pyaudio
+protobuf
