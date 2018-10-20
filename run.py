@@ -4,7 +4,7 @@ import time
 
 import cv2
 from tf_pose.estimator import TfPoseEstimator
-from tf_pose.networks import get_graph_path, model_wh
+from tf_pose.networks import get_graph_path
 
 logger = logging.getLogger('TfPoseEstimator')
 logger.setLevel(logging.DEBUG)
@@ -23,7 +23,7 @@ class Dance:
         self.resize_out_ratio = resize_out_ratio
         self.w = w
         self.h = h
-        # self.e = None
+        self.e = None
 
         self.image = None
         self.humans = list()
@@ -85,45 +85,6 @@ class Dance:
 
         cv2.destroyAllWindows()
 
-    def inf_cam(self, args):
-        w, h = self.w, self.h
-        e = TfPoseEstimator(get_graph_path(args.model), target_size=(w, h))
-
-        logger.debug('cam read+')
-        cam = cv2.VideoCapture(args.camera)
-        ret_val, image = cam.read()
-
-        logger.info('cam image=%dx%d' % (image.shape[1], image.shape[0]))
-
-        fps_time = 0
-
-        while True:
-            ret_val, image = cam.read()
-
-            logger.debug('image process+')
-            humans = e.inference(image, resize_to_default=(w > 0 and h > 0), upsample_size=args.resize_out_ratio)
-            print('Humans: {}'.format(len(humans)))
-            print('Humans[0]: {}'.format(humans[0]))
-
-            logger.debug('postprocess+')
-            image = TfPoseEstimator.draw_humans(image, humans, imgcopy=False)
-
-            # resize
-            image = cv2.resize(image, None, fx=0.5, fy=0.5)
-
-            logger.debug('show+')
-            cv2.putText(image,
-                        "FPS: %f" % (1.0 / (time.time() - fps_time)),
-                        (10, 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                        (0, 255, 0), 2)
-            cv2.imshow('tf-pose-estimation result', image)
-            fps_time = time.time()
-            if cv2.waitKey(1) == 27:
-                break
-            logger.debug('finished+')
-
-        cv2.destroyAllWindows()
-
     def parts2pose(self):
         pass
 
@@ -151,6 +112,5 @@ if __name__ == '__main__':
                         help='for debug purpose, if enabled, speed for inference is dropped.')
     args = parser.parse_args()
 
-    # Dance().inf_cam(args)
     dance = Dance(camera_num=args.camera, model=args.model)
     dance.infinite_cam()
