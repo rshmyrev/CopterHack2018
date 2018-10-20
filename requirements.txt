@@ -1,9 +1,11 @@
 pandas
 jupyter
+
 pymavlink
+
 opencv-python
 tensorflow
-tensorflow-gpu
+# tensorflow-gpu
 matplotlib
 imutils
 dlib
@@ -15,6 +17,8 @@ Theano
 h5py
 pydot
 
+-e git+https://github.com/ildoonet/tf-pose-estimation.git#egg=tf-pose
+
 # rviz
 wstool
 rosdep
@@ -24,7 +28,6 @@ rospkg
 catkin-pkg
 sphinx
 wxPython
-
 
 # audio
 pyaudio
