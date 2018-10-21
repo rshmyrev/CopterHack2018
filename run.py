@@ -10,13 +10,37 @@ import paramiko
 from tf_pose.estimator import TfPoseEstimator
 from tf_pose.networks import get_graph_path
 
-logger = logging.getLogger('TfPoseEstimator')
-logger.setLevel(logging.DEBUG)
+logger = logging.getLogger('Dance')
+logger.setLevel(logging.INFO)
 ch = logging.StreamHandler()
-ch.setLevel(logging.DEBUG)
+ch.setLevel(logging.INFO)
 formatter = logging.Formatter('[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s')
 ch.setFormatter(formatter)
 logger.addHandler(ch)
+
+
+def vector(p1, p2):
+    return np.array(p2) - np.array(p1)
+
+
+def unit_vector(vector):
+    """ Returns the unit vector of the vector.  """
+    return vector / np.linalg.norm(vector)
+
+
+def angle_between(v1, v2):
+    """ Returns the angle in radians between vectors 'v1' and 'v2'::
+
+    >>> angle_between((1, 0, 0), (0, 1, 0))
+    1.5707963267948966
+    >>> angle_between((1, 0, 0), (1, 0, 0))
+    0.0
+    >>> angle_between((1, 0, 0), (-1, 0, 0))
+    3.141592653589793
+    """
+    v1_u = unit_vector(v1)
+    v2_u = unit_vector(v2)
+    return np.arccos(np.clip(np.dot(v1_u, v2_u), -1.0, 1.0))
 
 
 class Dance:
@@ -46,25 +70,26 @@ class Dance:
         self.image = None
         self.humans = []
         self.human = None
-        self.hand = {'right': [], 'left': []}
+        self.pose = None
+        self.hand = {'right': None, 'left': None}
         self.elbow_angle = {'right': None, 'left': None}
         self.wrist_position = {'right': None, 'left': None}
         self.hand_direction = {'right': None, 'left': None}
-        self.pose = None
 
         # Draw params
         self.time = time.time()
-
+        self.text_params = (cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                            (0, 255, 0), 2)
 
         # Poses dict
         self.poses = {
-            1: 'both up',
-            2: 'both down',
-            3: 'both side',
-            4: 'right up, left side',
-            5: 'left up, right side',
-            6: 'right down, left side',
-            7: 'left down, right side',
+            1: 'both hands up',
+            2: 'both hands down',
+            3: 'both hands side',
+            4: 'right hand up, left hand side',
+            5: 'left hand up, right hand side',
+            6: 'right hand down, left hand side',
+            7: 'left hand down, right hand side',
         }
 
     def _init_cam(self):
@@ -102,7 +127,7 @@ class Dance:
         self.humans = self.e.inference(self.image, resize_to_default=(self.w > 0 and self.h > 0),
                                        upsample_size=self.resize_out_ratio)
         # logger.debug('Session: {}'.format(self.e.persistent_sess))
-        logger.debug('Count of humans: {}'.format(len(self.humans)))
+        logger.info('Count of humans: {}'.format(len(self.humans)))
         # logger.debug('Humans parts: {}'.format(self.humans[0]))
 
     def choose_best_human(self):
@@ -124,57 +149,57 @@ class Dance:
                              i in self.human.body_parts]
 
         if len(self.hand['right']) != 3:
-            self.hand['right'] = []
+            self.hand['right'] = None
         if len(self.hand['left']) != 3:
-            self.hand['left'] = []
+            self.hand['left'] = None
 
     @staticmethod
-    def _elbow_angle(hand):
+    def _elbow_angle(hand, vertical=True):
         """
 
-        :param hand: 3 points: (x1, x2, x3). x2 - координаты вершины угла
+        :param vertical:
+        :param hand: 3 points: (x1, x2, x3). x1 - плечо, x2 - локоть, x3 - запястье
         :return: degrees for x1-x2-x3 angle
         """
         x1, x2, x3 = hand
 
-        def length_line(p1, p2):
-            return np.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
+        if vertical:  # если нужно посчитать относительно вертикали, а не плеча
+            x1 = (x2[0], x2[1] + 1)  # берем точку локтя и сдвигаем вверх
 
-        p12 = length_line(x1, x2)
-        p13 = length_line(x1, x3)
-        p23 = length_line(x2, x3)
-
-        return np.degrees(np.arccos((p12 ** 2 - p13 ** 2 + p23 ** 2) / (2 * p12 * p23)))
+        v1 = vector(x1, x2)  # плечо
+        v2 = vector(x2, x3)  # предплечье
+        angle = angle_between(v1, v2)
+        logger.info('Angle in rads: %f' % angle)
+        return np.degrees(angle)
 
     @staticmethod
     def _wrist_position(hand):
         x1, x2, x3 = hand
-        if x3[1] > x1[1] and x3[1] > x2[1]:
+        if x3[1] < x1[1] and x3[1] < x2[1]:
             return 'up'
-        elif x3[1] < x1[1] and x3[1] < x2[1]:
+        elif x3[1] > x1[1] and x3[1] > x2[1]:
             return 'down'
         else:
             return ''
 
-    def _hand_direction(self, hand_name):
+    def _hand_direction(self, hand):
         angle_gap = 25  # degree
 
-        angle = self.elbow_angle[hand_name]
-        wrist_position = self.wrist_position[hand_name]
+        angle = self.elbow_angle[hand]
 
-        if 90 - angle_gap <= angle <= 90 + angle_gap:
-            if wrist_position == 'up':
-                return '90'
-            elif wrist_position == 'down':
-                return '270'
+        if angle <= 0 + angle_gap:
+            return '90'
 
-        elif 180 - angle_gap <= angle <= 0 + angle_gap:
+        elif 90 - angle_gap <= angle <= 90 + angle_gap:
             return '180'
+
+        elif 180 - angle_gap <= angle:
+            return '270'
 
         else:
             return ''
 
-    def calculate_hands_position(self):
+    def calculate_hands_direction(self):
         for hand_name in ('right', 'left'):
             if not self.hand[hand_name]:
                 continue
@@ -183,9 +208,9 @@ class Dance:
             self.wrist_position[hand_name] = self._wrist_position(self.hand[hand_name])
             self.hand_direction[hand_name] = self._hand_direction(hand_name)
 
-            logger.debug('{} hand. Angle: {}, wrist_direction: {}, hand_direction: {}'.format(
+            logger.info('{} hand. Angle: {}, wrist_direction: {}, hand_direction: {}'.format(
                 hand_name,
-                self.elbow_angle[hand_name],
+                int(self.elbow_angle[hand_name]),
                 self.wrist_position[hand_name],
                 self.hand_direction[hand_name]
             ))
@@ -219,9 +244,13 @@ class Dance:
         while True:
             self.reset_params()
             self.get_humans()
+            if not self.humans:
+                continue
             self.choose_best_human()
+            if not self.human:
+                continue
             self.get_hands()
-            self.calculate_hands_position()
+            self.calculate_hands_direction()
             self.calculate_pose()
             if self.pose:
                 logger.info('Pose {}'.format(self.pose))
@@ -233,8 +262,10 @@ class Dance:
 
             # Draw angles and pose
             image = self._draw_angle(image)
+            image = self._draw_hand_direction(image)
+            image = self._draw_wrist_position(image)
             image = self._draw_pose(image)
-            image = self._draw_fps(image)
+            # image = self._draw_fps(image)
 
             cv2.imshow('Result', image)
             if cv2.waitKey(1) == 27:
@@ -253,24 +284,51 @@ class Dance:
             center_on_image = (int(center_point[0] * image_w + 3.5), int(center_point[1] * image_h + 0.5))
             cv2.putText(npimg,
                         "Angle: {}".format(int(self.elbow_angle[hand_name])),
-                        center_on_image, cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                        (0, 255, 0), 2)
+                        center_on_image, *self.text_params)
+
+        return npimg
+
+    def _draw_hand_direction(self, npimg):
+        image_h, image_w = npimg.shape[:2]
+
+        for hand_name in ('right', 'left'):
+            if not self.hand_direction[hand_name]:
+                continue
+
+            center_point = self.hand[hand_name][0]
+            center_on_image = (int(center_point[0] * image_w + 3.5), int(center_point[1] * image_h + 0.5))
+            cv2.putText(npimg,
+                        "Direction: {}".format(self.hand_direction[hand_name]),
+                        center_on_image, *self.text_params)
+
+        return npimg
+
+    def _draw_wrist_position(self, npimg):
+        image_h, image_w = npimg.shape[:2]
+
+        for hand_name in ('right', 'left'):
+            if not self.wrist_position[hand_name]:
+                continue
+
+            center_point = self.hand[hand_name][2]
+            center_on_image = (int(center_point[0] * image_w + 3.5), int(center_point[1] * image_h + 0.5))
+            cv2.putText(npimg,
+                        "Wrist position: {}".format(self.wrist_position[hand_name]),
+                        center_on_image, *self.text_params)
 
         return npimg
 
     def _draw_pose(self, npimg):
         if self.pose:
             cv2.putText(npimg,
-                        "Pose: %s" % self.pose,
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                        (0, 255, 0), 2)
+                        "Pose: %s" % self.poses[self.pose],
+                        (10, 30), *self.text_params)
         return npimg
 
     def _draw_fps(self, npimg):
         cv2.putText(npimg,
                     "FPS: %f" % (1.0 / (time.time() - self.time)),
-                    (10, 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                    (0, 255, 0), 2)
+                    (10, 10), *self.text_params)
 
         self.time = time.time()
         return npimg
