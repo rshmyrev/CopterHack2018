@@ -20,22 +20,43 @@ logger.addHandler(ch)
 
 
 class Dance:
-    def __init__(self, camera_num=0, w=432, h=368, resize_out_ratio=4.0, model='mobilenet_thin'):
+    def __init__(self, camera_num=0, w=432, h=368, model='mobilenet_thin', resize_out_ratio=4.0):
+        # Camera
         self.camera_num = camera_num
         self.cam = None
+        self._init_cam()
+
+        # Model
         self.model = model
         self.resize_out_ratio = resize_out_ratio
         self.w = w
         self.h = h
         self.e = None
-
-        self.image = None
-        self.humans = list()
-
-        self._init_cam()
         self._init_estimator()
-        self.init_ssh()
 
+        # SSH with drone
+        self.ssh = None
+        self.host_keys = '/Users/rshmyrev/.ssh/known_hosts'
+        self.drone_ip = '192.168.1.31'
+        self.drone_username = 'pi'
+        self.drone_pass = 'raspberry'
+        # self.init_ssh()
+
+        # Image, humans, body parts
+        self.image = None
+        self.humans = []
+        self.human = None
+        self.hand = {'right': [], 'left': []}
+        self.elbow_angle = {'right': None, 'left': None}
+        self.wrist_position = {'right': None, 'left': None}
+        self.hand_direction = {'right': None, 'left': None}
+        self.pose = None
+
+        # Draw params
+        self.time = time.time()
+
+
+        # Poses dict
         self.poses = {
             1: 'both up',
             2: 'both down',
@@ -59,8 +80,19 @@ class Dance:
 
     def init_ssh(self):
         self.ssh = paramiko.SSHClient()
-        self.ssh.load_host_keys('/Users/rshmyrev/.ssh/known_hosts')
-        self.ssh.connect('192.168.1.31', username='pi', password='raspberry')
+        self.ssh.load_host_keys(self.host_keys)
+        self.ssh.connect(self.drone_ip, username=self.drone_username, password=self.drone_pass)
+
+    def reset_params(self):
+        self.image = None
+        self.humans = []
+        self.human = None
+        self.pose = None
+        for hand_name in ('right', 'left'):
+            self.hand[hand_name] = None
+            self.elbow_angle[hand_name] = None
+            self.wrist_position[hand_name] = None
+            self.hand_direction[hand_name] = None
 
     def get_humans(self):
         _, self.image = self.cam.read()
@@ -74,193 +106,174 @@ class Dance:
         # logger.debug('Humans parts: {}'.format(self.humans[0]))
 
     def choose_best_human(self):
-        "It's you"
-        if not self.humans:
-            return None
-        return self.humans[0]  # by Dima
+        """It's you"""
+        if self.humans:
+            self.human = self.humans[0]  # by Dima
 
     def destroy_all_humans(self):
         # TODO
         pass
 
-    def infinite_cam(self):
-        fps_time = 0
-        while True:
-            self.get_humans()
+    def get_hands(self):
+        if not self.human:
+            return
 
-            logger.debug('postprocess+')
-            image = TfPoseEstimator.draw_humans(self.image, self.humans, imgcopy=False)
+        self.hand['right'] = [(self.human.body_parts[i].x, self.human.body_parts[i].y) for i in range(2, 5) if
+                              i in self.human.body_parts]
+        self.hand['left'] = [(self.human.body_parts[i].x, self.human.body_parts[i].y) for i in range(5, 8) if
+                             i in self.human.body_parts]
 
-            # resize
-            image = cv2.resize(image, None, fx=0.5, fy=0.5)
-
-            logger.debug('show+')
-            cv2.putText(image,
-                        "FPS: %f" % (1.0 / (time.time() - fps_time)),
-                        (10, 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                        (0, 255, 0), 2)
-            cv2.imshow('tf-pose-estimation result', image)
-            fps_time = time.time()
-            if cv2.waitKey(1) == 27:
-                break
-            logger.debug('finished+')
-
-        cv2.destroyAllWindows()
+        if len(self.hand['right']) != 3:
+            self.hand['right'] = []
+        if len(self.hand['left']) != 3:
+            self.hand['left'] = []
 
     @staticmethod
-    def get_hands(human):
-        right_hand = [(human.body_parts[i].x, human.body_parts[i].y) for i in range(2, 5) if i in human.body_parts]
-        left_hand = [(human.body_parts[i].x, human.body_parts[i].y) for i in range(5, 8) if i in human.body_parts]
+    def _elbow_angle(hand):
+        """
 
-        if len(right_hand) != 3:
-            right_hand = None
-        if len(left_hand) != 3:
-            left_hand = None
-
-        return right_hand, left_hand
-
-    @staticmethod
-    def elbow_angle(hand):
+        :param hand: 3 points: (x1, x2, x3). x2 - координаты вершины угла
+        :return: degrees for x1-x2-x3 angle
+        """
         x1, x2, x3 = hand
 
         def length_line(p1, p2):
             return np.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
 
-        p12 = length_line(x1, x2)  # x2 - координаты вершины угла
+        p12 = length_line(x1, x2)
         p13 = length_line(x1, x3)
         p23 = length_line(x2, x3)
 
         return np.degrees(np.arccos((p12 ** 2 - p13 ** 2 + p23 ** 2) / (2 * p12 * p23)))
 
-    def parts2pose(self, right_hand, left_hand):
-        # TODO: something wrong with left wrist
-        def wrist_position(hand):
-            x1, x2, x3 = hand
-            if x3 > x1 and x3 > x2:
-                return 'up'
-            elif x3 < x1 and x3 < x2:
-                return 'down'
-            else:
-                return ''
+    @staticmethod
+    def _wrist_position(hand):
+        x1, x2, x3 = hand
+        if x3[1] > x1[1] and x3[1] > x2[1]:
+            return 'up'
+        elif x3[1] < x1[1] and x3[1] < x2[1]:
+            return 'down'
+        else:
+            return ''
 
-        def hand_direction(hand):
-            angle_gap = 25  # degree
+    def _hand_direction(self, hand_name):
+        angle_gap = 25  # degree
 
-            if 90 - angle_gap <= self.elbow_angle(hand) <= 90 + angle_gap:
-                if wrist_position(hand) == 'up':
-                    return '90'
-                elif wrist_position(hand) == 'down':
-                    return '270'
+        angle = self.elbow_angle[hand_name]
+        wrist_position = self.wrist_position[hand_name]
 
-            elif 180 - angle_gap <= self.elbow_angle(hand) <= 0 + angle_gap:
-                return '180'
+        if 90 - angle_gap <= angle <= 90 + angle_gap:
+            if wrist_position == 'up':
+                return '90'
+            elif wrist_position == 'down':
+                return '270'
 
-            else:
-                return ''
+        elif 180 - angle_gap <= angle <= 0 + angle_gap:
+            return '180'
 
-        if not right_hand or not left_hand:
-            return None
+        else:
+            return ''
 
-        logger.debug('Right hand. Angle: {}, wrist_direction: {}, hand_direction: {}'.format(
-            self.elbow_angle(right_hand),
-            wrist_position(right_hand),
-            hand_direction(right_hand)
-        ))
-        logger.debug('Left hand. Angle: {}, wrist_direction: {}, hand_direction: {}'.format(
-            self.elbow_angle(left_hand),
-            wrist_position(left_hand),
-            hand_direction(left_hand)
-        ))
+    def calculate_hands_position(self):
+        for hand_name in ('right', 'left'):
+            if not self.hand[hand_name]:
+                continue
 
-        rh_dir = hand_direction(right_hand)
-        lh_dir = hand_direction(left_hand)
+            self.elbow_angle[hand_name] = self._elbow_angle(self.hand[hand_name])
+            self.wrist_position[hand_name] = self._wrist_position(self.hand[hand_name])
+            self.hand_direction[hand_name] = self._hand_direction(hand_name)
 
-        if rh_dir == '90' and lh_dir == '90':
-            return 1
+            logger.debug('{} hand. Angle: {}, wrist_direction: {}, hand_direction: {}'.format(
+                hand_name,
+                self.elbow_angle[hand_name],
+                self.wrist_position[hand_name],
+                self.hand_direction[hand_name]
+            ))
 
-        elif rh_dir == '270' and lh_dir == '270':
-            return 2
+    def calculate_pose(self):
+        if not self.hand_direction['right'] or not self.hand_direction['left']:
+            self.pose = None
 
-        elif rh_dir == '180' and lh_dir == '180':
-            return 3
+        if self.hand_direction['right'] == '90' and self.hand_direction['left'] == '90':
+            self.pose = 1
 
-        elif rh_dir == '90' and lh_dir == '180':
-            return 4
+        elif self.hand_direction['right'] == '270' and self.hand_direction['left'] == '270':
+            self.pose = 2
 
-        elif lh_dir == '90' and rh_dir == '180':
-            return 5
+        elif self.hand_direction['right'] == '180' and self.hand_direction['left'] == '180':
+            self.pose = 3
 
-        elif rh_dir == '270' and lh_dir == '180':
-            return 6
+        elif self.hand_direction['right'] == '90' and self.hand_direction['left'] == '180':
+            self.pose = 4
 
-        elif lh_dir == '270' and rh_dir == '180':
-            return 7
+        elif self.hand_direction['left'] == '90' and self.hand_direction['right'] == '180':
+            self.pose = 5
+
+        elif self.hand_direction['right'] == '270' and self.hand_direction['left'] == '180':
+            self.pose = 6
+
+        elif self.hand_direction['left'] == '270' and self.hand_direction['right'] == '180':
+            self.pose = 7
 
     def infinite_loop(self):
-        fps_time = 0
-
         while True:
+            self.reset_params()
             self.get_humans()
-            human = self.choose_best_human()
-            image = TfPoseEstimator.draw_humans(self.image, [human, ], imgcopy=False)
+            self.choose_best_human()
+            self.get_hands()
+            self.calculate_hands_position()
+            self.calculate_pose()
+            if self.pose:
+                logger.info('Pose {}'.format(self.pose))
 
-            right_hand, left_hand = self.get_hands(human)
-
-            right_angle, left_angle = None, None
-            if right_hand:
-                right_angle = self.elbow_angle(right_hand)
-
-            if left_hand:
-                left_angle = self.elbow_angle(left_hand)
-
-            pose = self.parts2pose(right_hand, left_hand)
-            logger.info('Pose_num: {}'.format(pose))
-            if pose:
-                pose = self.poses[pose]
-                cv2.putText(image,
-                            "Pose: %s" % pose,
-                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1,
-                            (0, 255, 0), 2)
-
-            image = self.draw_angle(image, human, right_angle, left_angle)
-
+            # Draw
+            image = TfPoseEstimator.draw_humans(self.image, [self.human, ], imgcopy=False)
             # resize
             image = cv2.resize(image, None, fx=0.5, fy=0.5)
 
-            cv2.putText(image,
-                        "FPS: %f" % (1.0 / (time.time() - fps_time)),
-                        (10, 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                        (0, 255, 0), 2)
-            cv2.imshow('tf-pose-estimation result', image)
-            fps_time = time.time()
+            # Draw angles and pose
+            image = self._draw_angle(image)
+            image = self._draw_pose(image)
+            image = self._draw_fps(image)
+
+            cv2.imshow('Result', image)
             if cv2.waitKey(1) == 27:
                 break
 
         cv2.destroyAllWindows()
 
-    def draw_angle(self, npimg, human, right_angle, left_angle):
+    def _draw_angle(self, npimg):
         image_h, image_w = npimg.shape[:2]
 
-        if 3 in human.body_parts.keys() and right_angle:
-            body_part = human.body_parts[3]
-            center = (int(body_part.x * image_w + 3.5), int(body_part.y * image_h + 0.5))
-            cv2.putText(npimg,
-                        "Angle: {}".format(right_angle),
-                        center, cv2.FONT_HERSHEY_SIMPLEX, 1,
-                        (0, 255, 0), 2)
+        for hand_name in ('right', 'left'):
+            if not self.elbow_angle[hand_name]:
+                continue
 
-        if 6 in human.body_parts.keys() and left_angle:
-            body_part = human.body_parts[6]
-            center = (int(body_part.x * image_w + 3.5), int(body_part.y * image_h + 0.5))
+            center_point = self.hand[hand_name][1]
+            center_on_image = (int(center_point[0] * image_w + 3.5), int(center_point[1] * image_h + 0.5))
             cv2.putText(npimg,
-                        "Angle: {}".format(left_angle),
-                        center, cv2.FONT_HERSHEY_SIMPLEX, 1,
+                        "Angle: {}".format(int(self.elbow_angle[hand_name])),
+                        center_on_image, cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                         (0, 255, 0), 2)
 
         return npimg
 
-    def angle(self):
-        pass
+    def _draw_pose(self, npimg):
+        if self.pose:
+            cv2.putText(npimg,
+                        "Pose: %s" % self.pose,
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (0, 255, 0), 2)
+        return npimg
+
+    def _draw_fps(self, npimg):
+        cv2.putText(npimg,
+                    "FPS: %f" % (1.0 / (time.time() - self.time)),
+                    (10, 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (0, 255, 0), 2)
+
+        self.time = time.time()
+        return npimg
 
     def pose2commands(self):
         pass
@@ -278,17 +291,12 @@ class Dance:
 
         return ssh_stdout.read()
 
-    def get_telemetry(self):
+    def get_telemetry(self, frame_id=''):
         command = "get_telemetry"
-        params = {'frame_id': ''}
-        # cmd = 'rosservice call /{} "{}"'.format(command, params)
+        params = {'frame_id': frame_id}
 
         ssh_stdout = self.send2raspberry(command, params)
-        # ssh_stdin, ssh_stdout, ssh_stderr = ssh.exec_command('rosservice call /{} "{}"'.format(command, params))
-        # ssh_stdin, ssh_stdout, ssh_stderr = self.ssh.exec_command(cmd)
-        # logger.info(ssh_stdout.readlines())
         logger.info(ssh_stdout)
-        # logger.info(ssh_stderr)
 
         # channel = self.ssh.get_transport().open_session()
         # channel.get_pty()
@@ -315,12 +323,7 @@ class Dance:
         ssh_stdout = self.send2raspberry(command, params)
         logger.info(ssh_stdout)
 
-    def square(self):
-        z = 1
-        speed = 1
-        sleep_time = 1
-        update_frame = False
-
+    def square(self, z=1, speed=1, sleep_time=1, update_frame=False):
         self.navigate(x=1, y=1, z=z, speed=speed, frame_id='aruco_map', update_frame=update_frame)
         sleep(sleep_time)
         self.navigate(x=1, y=2, z=z, speed=speed, frame_id='aruco_map', update_frame=update_frame)
@@ -333,10 +336,13 @@ class Dance:
         sleep(sleep_time)
         self.land()
 
-    def both_up(self):
-        z = 2  # высота
-        tolerance = 0.2  # точность проверки высоты (м)
+    def both_up(self, z=1, tolerance=0.2):
+        """
+        Up on z metres
 
+        :param z: высота
+        :param tolerance: точность проверки высоты (м)
+        """
         start = self.get_telemetry()  # Запоминаем изначальную точку
         self.navigate(z=z, speed=0.5, frame_id='aruco_map', auto_arm=True)  # Взлетаем на 2 м
         while True:  # Ожидаем взлета
