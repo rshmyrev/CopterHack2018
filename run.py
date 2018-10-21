@@ -29,15 +29,7 @@ def unit_vector(vector):
 
 
 def angle_between(v1, v2):
-    """ Returns the angle in radians between vectors 'v1' and 'v2'::
-
-    >>> angle_between((1, 0, 0), (0, 1, 0))
-    1.5707963267948966
-    >>> angle_between((1, 0, 0), (1, 0, 0))
-    0.0
-    >>> angle_between((1, 0, 0), (-1, 0, 0))
-    3.141592653589793
-    """
+    """Returns the angle in radians between vectors 'v1' and 'v2'"""
     v1_u = unit_vector(v1)
     v2_u = unit_vector(v2)
     return np.arccos(np.clip(np.dot(v1_u, v2_u), -1.0, 1.0))
@@ -45,6 +37,21 @@ def angle_between(v1, v2):
 
 class Dance:
     def __init__(self, camera_num=0, w=432, h=368, model='mobilenet_thin', resize_out_ratio=4.0):
+        # SSH with drone
+        self.ssh = None
+        self.host_keys = '/Users/rshmyrev/.ssh/known_hosts'
+        self.drone_ip = '192.168.1.31'
+        self.drone_username = 'pi'
+        self.drone_pass = 'raspberry'
+        self.ssh_stdin = None
+        self.ssh_stdout = None
+        self.ssh_stderr = None
+        self.init_ssh()
+
+        # Stabilize
+        self._send_dima_command('stab')
+        logger.info('Drone stabilized')
+
         # Camera
         self.camera_num = camera_num
         self.cam = None
@@ -57,14 +64,6 @@ class Dance:
         self.h = h
         self.e = None
         self._init_estimator()
-
-        # SSH with drone
-        self.ssh = None
-        self.host_keys = '/Users/rshmyrev/.ssh/known_hosts'
-        self.drone_ip = '192.168.1.31'
-        self.drone_username = 'pi'
-        self.drone_pass = 'raspberry'
-        # self.init_ssh()
 
         # Image, humans, body parts
         self.image = None
@@ -81,15 +80,29 @@ class Dance:
         self.text_params = (cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                             (0, 255, 0), 2)
 
+        # Cmd
+        self.cmd = None
+        self.prev_cmd = None
+        self.stop = False
+
         # Poses dict
         self.poses = {
-            1: 'both hands up',
-            2: 'both hands down',
-            3: 'both hands side',
-            4: 'right hand up, left hand side',
-            5: 'left hand up, right hand side',
-            6: 'right hand down, left hand side',
-            7: 'left hand down, right hand side',
+            1: {'desc': 'both hands up',
+                'cmd': 'forward'},
+            2: {'desc': 'both hands down',
+                'cmd': 'land',
+                'stop': True},
+            3: {'desc': 'both hands side',
+                'cmd': 'backward'},
+            4: {'desc': 'right hand up, left hand side',
+                'cmd': 'left'},
+            5: {'desc': 'left hand up, right hand side',
+                'cmd': 'right'},
+            6: {'desc': 'right hand down, left hand side',
+                'cmd': 'go2',
+                'stop': True},
+            7: {'desc': 'left hand down, right hand side',
+                'cmd': 'up'},
         }
 
     def _init_cam(self):
@@ -118,6 +131,10 @@ class Dance:
             self.elbow_angle[hand_name] = None
             self.wrist_position[hand_name] = None
             self.hand_direction[hand_name] = None
+
+        self.ssh_stdin = None
+        self.ssh_stdout = None
+        self.ssh_stderr = None
 
     def get_humans(self):
         _, self.image = self.cam.read()
@@ -240,6 +257,20 @@ class Dance:
         elif self.hand_direction['left'] == '270' and self.hand_direction['right'] == '180':
             self.pose = 7
 
+    def send_pose2drone(self):
+        if self.stop:  # поднят флаг остановки
+            return
+
+        pose = self.poses[self.pose]
+        cmd = pose['cmd']
+        self.stop = pose.get('stop', False)
+
+        if cmd == self.prev_cmd:  # не отправляем одинаковые комманды
+            return
+
+        self._send_dima_command(cmd)
+        self.prev_cmd = cmd
+
     def infinite_loop(self):
         while True:
             self.reset_params()
@@ -252,8 +283,6 @@ class Dance:
             self.get_hands()
             self.calculate_hands_direction()
             self.calculate_pose()
-            if self.pose:
-                logger.info('Pose {}'.format(self.pose))
 
             # Draw
             image = TfPoseEstimator.draw_humans(self.image, [self.human, ], imgcopy=False)
@@ -265,9 +294,14 @@ class Dance:
             image = self._draw_hand_direction(image)
             image = self._draw_wrist_position(image)
             image = self._draw_pose(image)
+            image = self._draw_prev_cmd(image)
             # image = self._draw_fps(image)
-
             cv2.imshow('Result', image)
+
+            if self.pose:
+                logger.info('Pose {}, {} '.format(self.pose, self.poses[self.pose]['desc']))
+                self.send_pose2drone()
+
             if cv2.waitKey(1) == 27:
                 break
 
@@ -320,9 +354,20 @@ class Dance:
 
     def _draw_pose(self, npimg):
         if self.pose:
+            pose = self.poses[self.pose]
             cv2.putText(npimg,
-                        "Pose: %s" % self.poses[self.pose],
+                        "Pose: %s" % pose['desc'],
+                        (10, 10), *self.text_params)
+            cv2.putText(npimg,
+                        "Command: %s" % pose['cmd'],
                         (10, 30), *self.text_params)
+        return npimg
+
+    def _draw_prev_cmd(self, npimg):
+        if self.prev_cmd:
+            cv2.putText(npimg,
+                        "Prev sended cmd: %s" % self.prev_cmd,
+                        (10, 50), *self.text_params)
         return npimg
 
     def _draw_fps(self, npimg):
@@ -333,28 +378,27 @@ class Dance:
         self.time = time.time()
         return npimg
 
-    def pose2commands(self):
-        pass
-
-    def commands2route(self):
-        pass
-
-    def send2raspberry(self, command, params):
+    def _send_command(self, command):
         # 'source /opt/ros/kinetic/setup.bash'
         # 'source /home/pi/catkin_ws/devel/setup.bash'
-        # cmd = 'source /opt/ros/kinetic/setup.bash; source /home/pi/catkin_ws/devel/setup.bash; rosservice call /get_telemetry "{frame_id: }"'
-        cmd = 'source /opt/ros/kinetic/setup.bash; source /home/pi/catkin_ws/devel/setup.bash; rosservice call /{} "{}"'.format(
-            command, json.dumps(params))
-        ssh_stdin, ssh_stdout, ssh_stderr = self.ssh.exec_command(cmd)
+        cmd = 'source /opt/ros/kinetic/setup.bash; source /home/pi/catkin_ws/devel/setup.bash; {}'.format(command)
+        self.ssh_stdin, self.ssh_stdout, self.ssh_stderr = self.ssh.exec_command(cmd)
+        if self.ssh_stdout:
+            logger.info(self.ssh_stdout.read())
 
-        return ssh_stdout.read()
+    def _send_ros_command(self, command, params):
+        # cmd = 'source /opt/ros/kinetic/setup.bash; source /home/pi/catkin_ws/devel/setup.bash; rosservice call /get_telemetry "{frame_id: }"'
+        cmd = 'rosservice call /{} "{}"'.format(command, json.dumps(params))
+        self._send_command(cmd)
+
+    def _send_dima_command(self, filename):
+        cmd = 'bash /home/pi/show/{}.sh'.format(filename)
+        self._send_command(cmd)
 
     def get_telemetry(self, frame_id=''):
         command = "get_telemetry"
         params = {'frame_id': frame_id}
-
-        ssh_stdout = self.send2raspberry(command, params)
-        logger.info(ssh_stdout)
+        self._send_ros_command(command, params)
 
         # channel = self.ssh.get_transport().open_session()
         # channel.get_pty()
@@ -363,8 +407,6 @@ class Dance:
         # ssh_stdout = channel.recv(1024)
         # channel.close()
         # logger.info(ssh_stdout)
-
-        return ssh_stdout
 
     def navigate(self, x=0, y=0, z=0, speed=0.5, frame_id='aruco_map', update_frame=True, auto_arm=True):
         command = "navigate"
@@ -377,9 +419,7 @@ class Dance:
             'update_frame': update_frame,
             'auto_arm': auto_arm,
         }
-
-        ssh_stdout = self.send2raspberry(command, params)
-        logger.info(ssh_stdout)
+        self._send_ros_command(command, params)
 
     def square(self, z=1, speed=1, sleep_time=1, update_frame=False):
         self.navigate(x=1, y=1, z=z, speed=speed, frame_id='aruco_map', update_frame=update_frame)
@@ -394,7 +434,7 @@ class Dance:
         sleep(sleep_time)
         self.land()
 
-    def both_up(self, z=1, tolerance=0.2):
+    def up(self, z=1, tolerance=0.2):
         """
         Up on z metres
 
@@ -409,7 +449,10 @@ class Dance:
             sleep(0.2)  # ??? как зависание сделать
 
     def land(self):
-        self.send2raspberry('land', params={})
+        self._send_ros_command('land', params={})
+
+    def cmd_test(self):
+        self._send_dima_command('test')
 
 
 if __name__ == '__main__':
@@ -427,9 +470,11 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     dance = Dance(camera_num=args.camera, model=args.model)
+    # dance._send_dima_command('stab')
+    # sleep(2)
     dance.infinite_loop()
     # while True:
-    #     dance.get_telemetry()
+    #     dance.cmd_test()
     #     sleep(1)
 
     # dance.square()
