@@ -1,9 +1,12 @@
 import argparse
+import json
 import logging
 import time
+from time import sleep
 
 import cv2
 import numpy as np
+import paramiko
 from tf_pose.estimator import TfPoseEstimator
 from tf_pose.networks import get_graph_path
 
@@ -31,6 +34,7 @@ class Dance:
 
         self._init_cam()
         self._init_estimator()
+        self.init_ssh()
 
         self.poses = {
             1: 'both up',
@@ -53,6 +57,11 @@ class Dance:
         else:
             self.e = TfPoseEstimator(get_graph_path(self.model), target_size=(432, 368))
 
+    def init_ssh(self):
+        self.ssh = paramiko.SSHClient()
+        self.ssh.load_host_keys('/Users/rshmyrev/.ssh/known_hosts')
+        self.ssh.connect('192.168.1.31', username='pi', password='raspberry')
+
     def get_humans(self):
         _, self.image = self.cam.read()
         logger.info('cam image={:d}x{:d}'.format(self.image.shape[1], self.image.shape[0]))
@@ -66,6 +75,8 @@ class Dance:
 
     def choose_best_human(self):
         "It's you"
+        if not self.humans:
+            return None
         return self.humans[0]  # by Dima
 
     def destroy_all_humans(self):
@@ -257,8 +268,84 @@ class Dance:
     def commands2route(self):
         pass
 
-    def send2raspberry(self):
-        pass
+    def send2raspberry(self, command, params):
+        # 'source /opt/ros/kinetic/setup.bash'
+        # 'source /home/pi/catkin_ws/devel/setup.bash'
+        # cmd = 'source /opt/ros/kinetic/setup.bash; source /home/pi/catkin_ws/devel/setup.bash; rosservice call /get_telemetry "{frame_id: }"'
+        cmd = 'source /opt/ros/kinetic/setup.bash; source /home/pi/catkin_ws/devel/setup.bash; rosservice call /{} "{}"'.format(
+            command, json.dumps(params))
+        ssh_stdin, ssh_stdout, ssh_stderr = self.ssh.exec_command(cmd)
+
+        return ssh_stdout.read()
+
+    def get_telemetry(self):
+        command = "get_telemetry"
+        params = {'frame_id': ''}
+        # cmd = 'rosservice call /{} "{}"'.format(command, params)
+
+        ssh_stdout = self.send2raspberry(command, params)
+        # ssh_stdin, ssh_stdout, ssh_stderr = ssh.exec_command('rosservice call /{} "{}"'.format(command, params))
+        # ssh_stdin, ssh_stdout, ssh_stderr = self.ssh.exec_command(cmd)
+        # logger.info(ssh_stdout.readlines())
+        logger.info(ssh_stdout)
+        # logger.info(ssh_stderr)
+
+        # channel = self.ssh.get_transport().open_session()
+        # channel.get_pty()
+        # channel.settimeout(10)
+        # channel.exec_command(cmd)
+        # ssh_stdout = channel.recv(1024)
+        # channel.close()
+        # logger.info(ssh_stdout)
+
+        return ssh_stdout
+
+    def navigate(self, x=0, y=0, z=0, speed=0.5, frame_id='aruco_map', update_frame=True, auto_arm=True):
+        command = "navigate"
+        params = {
+            'x': x,
+            'y': y,
+            'z': z,
+            'speed': speed,
+            'frame_id': frame_id,
+            'update_frame': update_frame,
+            'auto_arm': auto_arm,
+        }
+
+        ssh_stdout = self.send2raspberry(command, params)
+        logger.info(ssh_stdout)
+
+    def square(self):
+        z = 1
+        speed = 1
+        sleep_time = 1
+        update_frame = False
+
+        self.navigate(x=1, y=1, z=z, speed=speed, frame_id='aruco_map', update_frame=update_frame)
+        sleep(sleep_time)
+        self.navigate(x=1, y=2, z=z, speed=speed, frame_id='aruco_map', update_frame=update_frame)
+        sleep(sleep_time)
+        self.navigate(x=2, y=2, z=z, speed=speed, frame_id='aruco_map', update_frame=update_frame)
+        sleep(sleep_time)
+        self.navigate(x=2, y=1, z=z, speed=speed, frame_id='aruco_map', update_frame=update_frame)
+        sleep(sleep_time)
+        self.navigate(x=1, y=1, z=z, speed=speed, frame_id='aruco_map', update_frame=update_frame)
+        sleep(sleep_time)
+        self.land()
+
+    def both_up(self):
+        z = 2  # высота
+        tolerance = 0.2  # точность проверки высоты (м)
+
+        start = self.get_telemetry()  # Запоминаем изначальную точку
+        self.navigate(z=z, speed=0.5, frame_id='aruco_map', auto_arm=True)  # Взлетаем на 2 м
+        while True:  # Ожидаем взлета
+            if self.get_telemetry().z - start.z + z < tolerance:  # Проверяем текущую высоту
+                break
+            sleep(0.2)  # ??? как зависание сделать
+
+    def land(self):
+        self.send2raspberry('land', params={})
 
 
 if __name__ == '__main__':
@@ -276,5 +363,12 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     dance = Dance(camera_num=args.camera, model=args.model)
-    # dance.infinite_cam()
     dance.infinite_loop()
+    # while True:
+    #     dance.get_telemetry()
+    #     sleep(1)
+
+    # dance.square()
+
+    # navigate(x=1, y=1, z=1, speed=1, frame_id='aruco_map', update_frame=True)
+    # dance.navigate(x=3, y=3, z=2, speed=speed, frame_id='aruco_map', update_frame=True)

@@ -18,6 +18,7 @@ h5py
 pydot
 
 -e git+https://github.com/ildoonet/tf-pose-estimation.git#egg=tf-pose
+# -e git+https://github.com/CopterExpress/clever.git#egg=clever
 
 # rviz
 wstool
@@ -32,3 +33,6 @@ wxPython
 # audio
 pyaudio
 protobuf
+
+
+paramiko
