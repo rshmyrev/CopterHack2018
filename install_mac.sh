@@ -12,3 +12,6 @@ brew install python3-tk
 brew install portaudio
 brew install protobuf
 brew install swig
+
+# Add jupyter notebook kernel
+#python -m ipykernel install --name copter

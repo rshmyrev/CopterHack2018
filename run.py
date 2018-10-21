@@ -79,6 +79,7 @@ class Dance:
         self.time = time.time()
         self.text_params = (cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                             (0, 255, 0), 2)
+        self.draw_resize = 1
 
         # Cmd
         self.cmd = None
@@ -186,7 +187,7 @@ class Dance:
         v1 = vector(x1, x2)  # плечо
         v2 = vector(x2, x3)  # предплечье
         angle = angle_between(v1, v2)
-        logger.info('Angle in rads: %f' % angle)
+        # logger.debug('Angle in rads: %f' % angle)
         return np.degrees(angle)
 
     @staticmethod
@@ -265,7 +266,7 @@ class Dance:
         cmd = pose['cmd']
         self.stop = pose.get('stop', False)
 
-        if cmd == self.prev_cmd:  # не отправляем одинаковые комманды
+        if cmd == self.prev_cmd:  # не отправляем одинаковые команды
             return
 
         self._send_dima_command(cmd)
@@ -287,13 +288,14 @@ class Dance:
             # Draw
             image = TfPoseEstimator.draw_humans(self.image, [self.human, ], imgcopy=False)
             # resize
-            image = cv2.resize(image, None, fx=0.5, fy=0.5)
+            image = cv2.resize(image, None, fx=self.draw_resize, fy=self.draw_resize)
 
             # Draw angles and pose
             image = self._draw_angle(image)
-            image = self._draw_hand_direction(image)
-            image = self._draw_wrist_position(image)
+            # image = self._draw_hand_direction(image)
+            # image = self._draw_wrist_position(image)
             image = self._draw_pose(image)
+            image = self._draw_cmd(image)
             image = self._draw_prev_cmd(image)
             # image = self._draw_fps(image)
             cv2.imshow('Result', image)
@@ -358,6 +360,11 @@ class Dance:
             cv2.putText(npimg,
                         "Pose: %s" % pose['desc'],
                         (10, 10), *self.text_params)
+        return npimg
+
+    def _draw_cmd(self, npimg):
+        if self.pose:
+            pose = self.poses[self.pose]
             cv2.putText(npimg,
                         "Command: %s" % pose['cmd'],
                         (10, 30), *self.text_params)
@@ -382,12 +389,14 @@ class Dance:
         # 'source /opt/ros/kinetic/setup.bash'
         # 'source /home/pi/catkin_ws/devel/setup.bash'
         cmd = 'source /opt/ros/kinetic/setup.bash; source /home/pi/catkin_ws/devel/setup.bash; {}'.format(command)
-        self.ssh_stdin, self.ssh_stdout, self.ssh_stderr = self.ssh.exec_command(cmd)
-        if self.ssh_stdout:
-            logger.info(self.ssh_stdout.read())
+        # self.ssh_stdin, self.ssh_stdout, self.ssh_stderr = self.ssh.exec_command(cmd)
+        # if self.ssh_stdout:
+        #     logger.info(self.ssh_stdout.read())
+
+        # try don't read remote std
+        self.ssh.exec_command(cmd)
 
     def _send_ros_command(self, command, params):
-        # cmd = 'source /opt/ros/kinetic/setup.bash; source /home/pi/catkin_ws/devel/setup.bash; rosservice call /get_telemetry "{frame_id: }"'
         cmd = 'rosservice call /{} "{}"'.format(command, json.dumps(params))
         self._send_command(cmd)
 
@@ -399,14 +408,6 @@ class Dance:
         command = "get_telemetry"
         params = {'frame_id': frame_id}
         self._send_ros_command(command, params)
-
-        # channel = self.ssh.get_transport().open_session()
-        # channel.get_pty()
-        # channel.settimeout(10)
-        # channel.exec_command(cmd)
-        # ssh_stdout = channel.recv(1024)
-        # channel.close()
-        # logger.info(ssh_stdout)
 
     def navigate(self, x=0, y=0, z=0, speed=0.5, frame_id='aruco_map', update_frame=True, auto_arm=True):
         command = "navigate"
