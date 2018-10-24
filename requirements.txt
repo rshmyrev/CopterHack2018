@@ -1,39 +1,6 @@
 numpy
-pandas
-jupyter
-
-pymavlink
-
+paramiko
 opencv-python
 tensorflow
 # tensorflow-gpu
-matplotlib
-imutils
-dlib
-scikit-learn
-scikit-image
-Keras
-mxnet
-Theano
-h5py
-pydot
-
 -e git+https://github.com/ildoonet/tf-pose-estimation.git#egg=tf-pose
-# -e git+https://github.com/CopterExpress/clever.git#egg=clever
-
-# rviz
-wstool
-rosdep
-rosinstall
-rosinstall_generator
-rospkg
-catkin-pkg
-sphinx
-wxPython
-
-# audio
-pyaudio
-protobuf
-
-
-paramiko
